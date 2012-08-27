@@ -256,6 +256,21 @@ srl_write_header(pTHX_ srl_encoder_t *enc)
 }
 
 
+/* Call with a string buffer of at least 30 chars
+ * FIXME 30 is likely too large */
+static SRL_INLINE char *
+my_itoa(register UV i, char str[])
+{
+    register char* p = str + 29;
+    for(*p--=0;;) {
+        *p--=i%10+0x30;
+        if (!(i/=10))
+            break;
+    }
+    return ++p;
+}
+
+
 /* Code for serializing floats */
 static SRL_INLINE void
 srl_dump_nv(pTHX_ srl_encoder_t *enc, SV *src)
@@ -462,9 +477,8 @@ srl_dump_sv(pTHX_ srl_encoder_t *enc, SV *src)
     }
     /* if we got here we have not seen this scalar before */
 
-    flags = SvFLAGS(src) & public_sv_type_flags;
-
     /* Only one of the three public flags set: */
+    flags = SvFLAGS(src) & public_sv_type_flags;
     if (flags && !(flags & (flags - 1))) {
         switch (flags) {
         /* dump pure ints */
@@ -488,22 +502,43 @@ srl_dump_sv(pTHX_ srl_encoder_t *enc, SV *src)
         }
         return;
     }
-    else {
-        /* multiple public type flags set */
-    }
 
     /* If we reach this, then we have multiple basic SV type flags or something
      * entirely different (RV, undef, ...?).
      * First approximation for non-rvs && !undef:
      * prefer strings, then floats, then ints (play it safe)
-     * TODO: Handle IVPV case better */
-
-    /* dump references */
-    if (SvROK(src))
-        return srl_dump_rv(aTHX_ enc, src);
+     */
     /* undef */
-    else if (!SvOK(src))
+    if (!SvOK(src))
         return srl_buf_cat_char(enc, SRL_HDR_UNDEF);
+    /* dump references */
+    else if (SvROK(src))
+        return srl_dump_rv(aTHX_ enc, src);
+    /* FIXME if SvUTF8, can it be a valid int? */
+    /* TODO: Handle IVPV case better */
+    else if (flags == SVf_IOK|SVf_POK) {
+        U8 neg = SvIVX(src) < 0 ? 1 : 0; /* FIXME one branch too many */
+        UV x = neg ? (UV)-SvIVX(src) : SvUVX(src);
+        char *pv = SvPVX(src);
+        STRLEN len = SvCUR(src);
+        char str[30];
+        char *start = my_itoa(x, str);
+        if (neg && (len == 0 || *pv++ != '-')) {
+            srl_dump_pv(aTHX_ enc, pv, len, SvUTF8(src));
+            return;
+        }
+        else {
+            STRLEN i = 0;
+            while (i < len) {
+                if (start[i] != pv[i]) {
+                    srl_dump_pv(aTHX_ enc, pv, len, SvUTF8(src));
+                    return;
+                }
+                ++i;
+            }
+            srl_dump_ivuv(aTHX_ enc, src); /* FIXME optimize: we already have the sign and the int */
+        }
+    }
     /* dump strings */
     else if (SvPOKp(src)) {
         STRLEN len;
