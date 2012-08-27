@@ -400,6 +400,8 @@ srl_dump_sv(pTHX_ srl_encoder_t *enc, SV *src)
 {
     UV refcount;
     U8 value_is_weak_referent = 0;
+    U32 flags;
+    const U32 public_sv_type_flags = SVf_IOK | SVf_POK | SVf_NOK;
 
     SvGETMAGIC(src);
 
@@ -460,8 +462,50 @@ srl_dump_sv(pTHX_ srl_encoder_t *enc, SV *src)
     }
     /* if we got here we have not seen this scalar before */
 
+    flags = SvFLAGS(src) & public_sv_type_flags;
+
+    /* Only one of the three public flags set: */
+    if (flags && !(flags & (flags - 1))) {
+        switch (flags) {
+        /* dump pure ints */
+        case SVf_IOK:
+            srl_dump_ivuv(aTHX_ enc, src);
+            break;
+        /* dump pure strings */
+        case SVf_POK:
+            {
+                STRLEN len;
+                char *str = SvPV(src, len);
+                srl_dump_pv(aTHX_ enc, str, len, SvUTF8(src));
+            }
+            break;
+        /* dump pure floats */
+        case SVf_NOK:
+            srl_dump_nv(aTHX_ enc, src);
+            break;
+        default:
+            croak("Attempting to dump unsupported or invalid SV (this should not be reached)");
+        }
+        return;
+    }
+    else {
+        /* multiple public type flags set */
+    }
+
+    /* If we reach this, then we have multiple basic SV type flags or something
+     * entirely different (RV, undef, ...?).
+     * First approximation for non-rvs && !undef:
+     * prefer strings, then floats, then ints (play it safe)
+     * TODO: Handle IVPV case better */
+
+    /* dump references */
+    if (SvROK(src))
+        return srl_dump_rv(aTHX_ enc, src);
+    /* undef */
+    else if (!SvOK(src))
+        return srl_buf_cat_char(enc, SRL_HDR_UNDEF);
     /* dump strings */
-    if (SvPOKp(src)) {
+    else if (SvPOKp(src)) {
         STRLEN len;
         char *str = SvPV(src, len);
         srl_dump_pv(aTHX_ enc, str, len, SvUTF8(src));
@@ -472,12 +516,6 @@ srl_dump_sv(pTHX_ srl_encoder_t *enc, SV *src)
     /* dump ints */
     else if (SvIOKp(src))
         srl_dump_ivuv(aTHX_ enc, src);
-    /* undef */
-    else if (!SvOK(src))
-        srl_buf_cat_char(enc, SRL_HDR_UNDEF);
-    /* dump references */
-    else if (SvROK(src)) 
-        srl_dump_rv(aTHX_ enc, src);
     else {
         croak("Attempting to dump unsupported or invalid SV");
     }
