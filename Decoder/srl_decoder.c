@@ -568,11 +568,11 @@ srl_read_copy(pTHX_ srl_decoder_t *dec)
     AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &item));
 
     if (expect_false( dec->save_pos )) {
-        warn("COPY(%d) called during parse", item);
+        warn("COPY(%d) called during parse", (int)item);
         return NULL;
     }
     if (expect_false( (IV)item > dec->buf_end - dec->buf_start )) {
-        warn("COPY(%d) points out of packet",item);
+        warn("COPY(%d) points out of packet", (int)item);
         return NULL;
     }
 
@@ -734,7 +734,7 @@ srl_read_single_value(pTHX_ srl_decoder_t *dec, U8 *track_pos)
         if (expect_true( track_pos == 0 ))
             track_pos= dec->pos - 1;
         else {
-            NYWARN("bad tracking");
+            warn("bad tracking");
             return NULL;
         }
         tag= tag & ~SRL_HDR_TRACK_FLAG;
@@ -773,12 +773,12 @@ srl_read_single_value(pTHX_ srl_decoder_t *dec, U8 *track_pos)
             case SRL_HDR_COPY:          ret= srl_read_copy(aTHX_ dec);          break;
 
             case SRL_HDR_EXTEND:        ret= srl_read_extend(aTHX_ dec);        break;
-            case SRL_HDR_LIST:          {ERROR_UNEXPECTED(dec,tag); return NULL;} break;
+            case SRL_HDR_LIST:          {WARN_UNEXPECTED(dec, "a tag starting a new structure"); return NULL;} break;
 
             case SRL_HDR_WEAKEN:        ret= srl_read_weaken(aTHX_ dec, track_pos); break;
             case SRL_HDR_REGEXP:        ret= srl_read_regexp(aTHX_ dec);        break;
 
-            case SRL_HDR_TAIL:          {ERROR_UNEXPECTED(dec,tag); return NULL;} break;
+            case SRL_HDR_TAIL:          {WARN_UNEXPECTED(dec, "a tag starting a new structure"); return NULL;} break;
             case SRL_HDR_PAD:           /* no op */                             
                 while (BUF_NOT_DONE(dec) && *dec->pos == SRL_HDR_PAD)
                     dec->pos++;
@@ -788,7 +788,7 @@ srl_read_single_value(pTHX_ srl_decoder_t *dec, U8 *track_pos)
                 if (expect_true( SRL_HDR_RESERVED_LOW <= tag && tag <= SRL_HDR_RESERVED_HIGH )) {
                     AND_RETURN_NULL(ret= srl_read_reserved(aTHX_ dec, tag));
                 } else {
-                    WARN_PANIC(dec,tag);
+                    warn("Panic: Found invalid tag %u", tag);
                     return NULL;
                 }
             break;
@@ -813,8 +813,8 @@ srl_read_reserved(pTHX_ srl_decoder_t *dec, U8 tag)
 {
     UV len;
     (void)tag; /* unused as of now */
-    AND_RETURN_FAIL(srl_read_varint_uv(aTHX_ dec, &len));
-    ASSERT_BUF_SPACE(dec, len);
+    AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &len));
+    ASSERT_BUF_SPACE_NULL(dec, len);
     dec->pos += len; /* discard */
     return &PL_sv_undef;
 }
