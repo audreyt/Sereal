@@ -228,10 +228,10 @@ srl_read_varint_uv_safe(pTHX_ srl_decoder_t *dec, UV *rv)
     while (BUF_NOT_DONE(dec) && *dec->pos & 0x80) {
         uv |= ((UV)(*dec->pos++ & 0x7F) << lshift);
         lshift += 7;
-        AND_DO_RETURN_FAIL(
-            lshift > (sizeof(UV) * 8),
-            warn("varint too big")
-        );
+        if (expect_false( lshift > (sizeof(UV) * 8) )) {
+            warn("varint too big");
+            return FAIL;
+        }
     }
     if (expect_true( BUF_NOT_DONE(dec) )) {
         uv |= ((UV)*dec->pos++ << lshift);
@@ -253,10 +253,10 @@ srl_read_varint_uv_nocheck(pTHX_ srl_decoder_t *dec, UV *rv)
     while (*dec->pos & 0x80) {
         uv |= ((UV)(*dec->pos++ & 0x7F) << lshift);
         lshift += 7;
-        AND_DO_RETURN_FAIL(
-            lshift > (sizeof(UV) * 8),
-            warn("varint too big")
-        );
+        if (expect_false( lshift > (sizeof(UV) * 8) )) {
+            warn("varint too big");
+            return FAIL;
+        }
     }
     uv |= ((UV)(*dec->pos++) << lshift);
     *rv = uv;
