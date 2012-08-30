@@ -46,7 +46,7 @@ extern "C" {
 #include "srl_protocol.h"
 
 /* declare some of the in-file functions to avoid ordering issues */
-static SRL_INLINE UV srl_read_varint_uv(pTHX_ srl_decoder_t *dec);
+static SRL_INLINE int srl_read_varint_uv(pTHX_ srl_decoder_t *dec, UV *rv);
 
 SV *srl_read_single_value(pTHX_ srl_decoder_t *dec, U8 *track_pos);
 static SRL_INLINE SV *srl_read_hash(pTHX_ srl_decoder_t *dec, U8 *track_pos);
@@ -64,6 +64,8 @@ static SRL_INLINE SV *srl_read_copy(pTHX_ srl_decoder_t *dec);
 static SRL_INLINE SV *srl_read_reuse(pTHX_ srl_decoder_t *dec);
 static SRL_INLINE SV *srl_read_alias(pTHX_ srl_decoder_t *dec);
 static SRL_INLINE SV *srl_fetch_item(pTHX_ srl_decoder_t *dec, UV item, const char const *tag_name);
+static SRL_INLINE int srl_read_varint_uv_nocheck(pTHX_ srl_decoder_t *dec, UV *rv);
+static SRL_INLINE int srl_read_varint_uv_safe(pTHX_ srl_decoder_t *dec, UV *rv);
 
 /* FIXME unimplemented!!! */
 static SRL_INLINE SV *srl_read_bless(pTHX_ srl_decoder_t *dec);
@@ -71,12 +73,6 @@ static SRL_INLINE SV *srl_read_blessv(pTHX_ srl_decoder_t *dec);
 static SRL_INLINE SV *srl_read_reserved(pTHX_ srl_decoder_t *dec, U8 tag);
 static SRL_INLINE SV *srl_read_regexp(pTHX_ srl_decoder_t *dec);
 static SRL_INLINE SV *srl_read_extend(pTHX_ srl_decoder_t *dec);
-
-#define ASSERT_BUF_SPACE(dec,len) STMT_START {              \
-    if (expect_false( (UV)BUF_SPACE((dec)) < (UV)(len) )) { \
-        MYCROAK("Unexpected termination of packet, want %lu bytes, only have %lu available", (UV)(len), (UV)BUF_SPACE((dec)));  \
-    }                                                       \
-} STMT_END
 
 
 /* Explicit destructor */
@@ -170,18 +166,26 @@ srl_read_header(pTHX_ srl_decoder_t *dec)
 {
     UV len;
     /* works for now: 3 byte magic string + proto version + 1 byte varint that indicates zero-length header */
-    ASSERT_BUF_SPACE(dec, sizeof(SRL_MAGIC_STRING "\x01") ); /* sizeof returns the size for the 0, so we dont need to add 1 for the varint */
+    /* sizeof returns the size for the 0, so we dont need to add 1 for the varint */
+    ASSERT_BUF_SPACE_FAIL(dec, sizeof(SRL_MAGIC_STRING "\x01") );
     if (expect_true( strEQ((char*)dec->pos, SRL_MAGIC_STRING "\x01") )) {
         dec->pos += sizeof(SRL_MAGIC_STRING "\x01") - 1;
-        len= srl_read_varint_uv(aTHX_ dec); /* must do this via a temporary as it modifes dec->pos itself */
+        /* must do this via a temporary as it modifes dec->pos itself */
+        AND_DO_RETURN_FAIL(
+            srl_read_varint_uv(aTHX_ dec, &len),
+            MYWARN("bad header")
+        );
         dec->pos += len;
     } else {
-        ERROR("bad header");
+        MYWARN("bad header");
+        return FAIL;
     }
-    return 0;
+    return SUCCESS;
 }
 
-int srl_finalize_structure(pTHX_ srl_decoder_t *dec)
+
+int
+srl_finalize_structure(pTHX_ srl_decoder_t *dec)
 {
     if (dec->ref_stashes) {
         PTABLE_ITER_t *it = PTABLE_iter_new(dec->ref_stashes);
@@ -195,15 +199,18 @@ int srl_finalize_structure(pTHX_ srl_decoder_t *dec)
             HV *stash = (HV* )ent->value;
             AV *ref_bless_av  = PTABLE_fetch(dec->ref_bless_av, ent->key);
             I32 len;
-            if (expect_false( !stash || !ref_bless_av )) {
-                ERROR("missing stash or ref_bless_av!");
-            }
+            OR_DO_RETURN_FAIL(
+                !stash || !ref_bless_av,
+                (PTABLE_iter_free(it), MYWARN("missing stash or ref_bless_av!"))
+            );
             for( len= av_len(ref_bless_av) + 1 ; len > 0 ; len-- ) {
                 SV* obj= av_pop(ref_bless_av);
                 if (expect_true( obj )) {
                     sv_bless(obj, stash);
                 } else {
-                    ERROR("object missing from ref_bless_av array?");
+                    PTABLE_iter_free(it);
+                    MYWARN("object missing from ref_bless_av array?");
+                    return FAIL;
                 }
             }
         }
@@ -212,8 +219,8 @@ int srl_finalize_structure(pTHX_ srl_decoder_t *dec)
     return 0;
 }
 
-static SRL_INLINE UV
-srl_read_varint_uv_safe(pTHX_ srl_decoder_t *dec)
+static SRL_INLINE int
+srl_read_varint_uv_safe(pTHX_ srl_decoder_t *dec, UV *rv)
 {
     UV uv= 0;
     unsigned int lshift= 0;
@@ -221,19 +228,24 @@ srl_read_varint_uv_safe(pTHX_ srl_decoder_t *dec)
     while (BUF_NOT_DONE(dec) && *dec->pos & 0x80) {
         uv |= ((UV)(*dec->pos++ & 0x7F) << lshift);
         lshift += 7;
-        if (lshift > (sizeof(UV) * 8))
-            ERROR("varint too big");
+        AND_DO_RETURN_FAIL(
+            lshift > (sizeof(UV) * 8),
+            MYWARN("varint too big")
+        );
     }
     if (expect_true( BUF_NOT_DONE(dec) )) {
         uv |= ((UV)*dec->pos++ << lshift);
     } else {
-        ERROR("varint terminated prematurely");
+        MYWARN("varint terminated prematurely");
+        return FAIL;
     }
-    return uv;
+
+    *rv = uv;
+    return SUCCESS;
 }
 
-static SRL_INLINE UV
-srl_read_varint_uv_nocheck(pTHX_ srl_decoder_t *dec)
+static SRL_INLINE int
+srl_read_varint_uv_nocheck(pTHX_ srl_decoder_t *dec, UV *rv)
 {
     UV uv= 0;
     unsigned int lshift= 0;
@@ -241,32 +253,42 @@ srl_read_varint_uv_nocheck(pTHX_ srl_decoder_t *dec)
     while (*dec->pos & 0x80) {
         uv |= ((UV)(*dec->pos++ & 0x7F) << lshift);
         lshift += 7;
-        if (expect_false( lshift > (sizeof(UV) * 8) ))
-            ERROR("varint too big");
+        AND_DO_RETURN_FAIL(
+            lshift > (sizeof(UV) * 8),
+            MYWARN("varint too big")
+        );
     }
     uv |= ((UV)(*dec->pos++) << lshift);
-    return uv;
+    *rv = uv;
+
+    return SUCCESS;
 }
 
-static SRL_INLINE UV
-srl_read_varint_uv(pTHX_ srl_decoder_t *dec)
+static SRL_INLINE int
+srl_read_varint_uv(pTHX_ srl_decoder_t *dec, UV *rv)
 {
-    if (expect_true( dec->buf_end - dec->pos > 10 ))
-        return srl_read_varint_uv_nocheck(aTHX_ dec);
-    else
-        return srl_read_varint_uv_safe(aTHX_ dec);
+    if (expect_true( dec->buf_end - dec->pos > 10 )) {
+        AND_RETURN_FAIL(srl_read_varint_uv_nocheck(aTHX_ dec, rv));
+    } else {
+        AND_RETURN_FAIL(srl_read_varint_uv_safe(aTHX_ dec, rv));
+    }
+    return SUCCESS;
 }
 
 static SRL_INLINE void
-srl_track_sv(pTHX_ srl_decoder_t *dec, U8 *track_pos, SV *sv) {
+srl_track_sv(pTHX_ srl_decoder_t *dec, U8 *track_pos, SV *sv)
+{
     PTABLE_store(dec->ref_seenhash, (void *)(track_pos - dec->buf_start), (void *)sv);
 }
 
 static SRL_INLINE SV *
-srl_fetch_item(pTHX_ srl_decoder_t *dec, UV item, const char const *tag_name) {
+srl_fetch_item(pTHX_ srl_decoder_t *dec, UV item, const char const *tag_name)
+{
     SV *sv= (SV *)PTABLE_fetch(dec->ref_seenhash, (void *)item);
-    if (expect_false( !sv ))
-        ERRORf2("%s(%d) references an unknown item", tag_name, item);
+    if (expect_false( !sv )) {
+        WARNf2("%s(%d) references an unknown item", tag_name, item);
+        return NULL;
+    }
     return sv;
 }
 
@@ -278,22 +300,26 @@ srl_fetch_item(pTHX_ srl_decoder_t *dec, UV item, const char const *tag_name) {
 static SRL_INLINE SV *
 srl_read_varint(pTHX_ srl_decoder_t *dec)
 {
-    return newSVuv(srl_read_varint_uv(aTHX_ dec));
+    UV uv;
+    AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &uv));
+    return newSVuv(uv);
 }
 
 static SRL_INLINE SV *
 srl_read_zigzag(pTHX_ srl_decoder_t *dec)
 {
-    const UV uv= srl_read_varint_uv(aTHX_ dec);
+    UV uv;
+    AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &uv));
     return uv & 1 ? newSViv((IV)-( 1 + (uv >> 1) )) : newSVuv(uv >> 1);
 }
 
 static SRL_INLINE SV *
 srl_read_string(pTHX_ srl_decoder_t *dec, int is_utf8)
 {
-    UV len= srl_read_varint_uv(aTHX_ dec);
+    UV len;
     SV *ret;
-    ASSERT_BUF_SPACE(dec, len);
+    AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &len));
+    ASSERT_BUF_SPACE_NULL(dec, len);
     ret= newSVpvn_utf8((char *)dec->pos,len,is_utf8);
     dec->pos+= len;
     return ret;
@@ -303,7 +329,7 @@ static SRL_INLINE SV *
 srl_read_float(pTHX_ srl_decoder_t *dec)
 {
     SV *ret;
-    ASSERT_BUF_SPACE(dec, sizeof(float));
+    ASSERT_BUF_SPACE_NULL(dec, sizeof(float));
     ret= newSVnv((NV)*((float *)dec->pos));
     dec->pos+= sizeof(float);
     return ret;
@@ -313,7 +339,7 @@ static SRL_INLINE SV *
 srl_read_double(pTHX_ srl_decoder_t *dec)
 {
     SV *ret;
-    ASSERT_BUF_SPACE(dec, sizeof(double));
+    ASSERT_BUF_SPACE_NULL(dec, sizeof(double));
     ret= newSVnv((NV)*((double *)dec->pos));
     dec->pos+= sizeof(double);
     return ret;
@@ -323,7 +349,7 @@ static SRL_INLINE SV *
 srl_read_long_double(pTHX_ srl_decoder_t *dec)
 {
     SV *ret;
-    ASSERT_BUF_SPACE(dec, sizeof(long double));
+    ASSERT_BUF_SPACE_NULL(dec, sizeof(long double));
     ret= newSVnv((NV)*((long double *)dec->pos));
     dec->pos+= sizeof(long double);
     return ret;
@@ -332,24 +358,37 @@ srl_read_long_double(pTHX_ srl_decoder_t *dec)
 
 static SRL_INLINE SV *
 srl_read_array(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
-    UV len= srl_read_varint_uv(aTHX_ dec);
-    AV *av= newAV();
-    SV *rv= newRV_noinc((SV *)av);
+    UV len;
+    AV *av;
+    SV *rv;
+
+    AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &len));
+    av= newAV();
+    rv= newRV_noinc((SV *)av);
+
     if (expect_false( track_pos ))
         srl_track_sv(aTHX_ dec, track_pos, (SV*)rv);
     if (expect_false( len > 8 ))
         av_extend(av, len+1);
     while ( len-- > 0) {
         if (expect_false( *dec->pos == SRL_HDR_LIST )) {
+            SvREFCNT_dec(rv);
             ERROR_UNIMPLEMENTED(dec, SRL_HDR_LIST, "LIST");
         }
         SV *got= srl_read_single_value(aTHX_ dec, NULL);
         av_push(av, got);
     }
-    ASSERT_BUF_SPACE(dec,1);
+    /* inline ASSERT_BUF_SPACE with SvREFCNT_dec - TODO? Macroify */
+    if (expect_false( (UV)BUF_SPACE((dec)) < (UV)1 )) {
+        SvREFCNT_dec(rv);
+        MYWARN("Unexpected termination of packet, want %lu bytes, "
+               "only have %lu available",
+               (UV)1, (UV)BUF_SPACE((dec)));
+    }
     if (expect_true( *dec->pos == SRL_HDR_TAIL )) {
         dec->pos++;
     } else {
+        SvREFCNT_dec(rv);
         ERROR_UNTERMINATED(dec,SRL_HDR_ARRAY,"ARRAY");
     }
     return rv;
@@ -357,9 +396,13 @@ srl_read_array(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
 
 static SRL_INLINE SV *
 srl_read_hash(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
-    IV num_keys= srl_read_varint_uv(aTHX_ dec);
-    HV *hv= newHV();
-    SV *rv= newRV_noinc((SV *)hv);
+    IV num_keys;
+    HV *hv;
+    SV *rv;
+
+    AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &num_keys));
+    hv= newHV();
+    rv= newRV_noinc((SV *)hv);
     hv_ksplit(hv, num_keys); /* make sure we have enough room */
     /* NOTE: contents of hash are stored VALUE/KEY, reverse from normal perl
      * storage, this is because it simplifies the hash storage logic somewhat */
@@ -367,43 +410,77 @@ srl_read_hash(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
         srl_track_sv(aTHX_ dec, track_pos, (SV*)rv);
     for (; num_keys > 0 ; num_keys--) {
         STRLEN key_len;
+        U8 tag;
         SV *key_sv;
         SV *got_sv= srl_read_single_value(aTHX_ dec, NULL);
-        U8 tag;
+        if (expect_false( !got_sv )) {
+            SvREFCNT_dec(rv);
+            return NULL;
+        }
 
       read_key:
-        ASSERT_BUF_SPACE(dec,1);
+        ASSERT_BUF_SPACE_DO_RETURN_NULL(
+            dec,1,
+            SvREFCNT_dec(rv)
+        );
         tag= *dec->pos++;
         if (tag == SRL_HDR_STRING_UTF8) {
-            key_len= srl_read_varint_uv(aTHX_ dec);
-            ASSERT_BUF_SPACE(dec,key_len);
+            AND_DO_RETURN_NULL(
+                srl_read_varint_uv(aTHX_ dec, &key_len),
+                (SvREFCNT_dec(rv), SvREFCNT_dec(got_sv))
+            );
+            ASSERT_BUF_SPACE_DO_RETURN_NULL(
+                dec,key_len,
+                (SvREFCNT_dec(rv), SvREFCNT_dec(got_sv))
+            );
             key_sv= newSVpvn_flags((char*)dec->pos,key_len,1);
-            if (expect_false( !hv_store_ent(hv,key_sv,got_sv,0))) {
-                SvREFCNT_dec(key_sv); /* throw away the key */
-                ERROR_PANIC(dec,"failed to hv_store_ent");
-            } else {
+            if (expect_true( hv_store_ent(hv,key_sv,got_sv,0) )) {
                 SvREFCNT_dec(key_sv);
+            }
+            else {
+                SvREFCNT_dec(got_sv);
+                SvREFCNT_dec(rv);
+                SvREFCNT_dec(key_sv); /* throw away the key */
+                MYWARN("Panic: failed to hv_store_ent");
+                return NULL;
             }
         } else {
             if (tag & SRL_HDR_ASCII) {
                 key_len= tag & SRL_HDR_ASCII_LEN_MASK;
             } else if (tag == SRL_HDR_STRING) {
-                key_len= srl_read_varint_uv(aTHX_ dec);
+                AND_DO_RETURN_NULL(
+                    srl_read_varint_uv(aTHX_ dec, &key_len),
+                    (SvREFCNT_dec(rv), SvREFCNT_dec(got_sv))
+                );
             } else if (tag == SRL_HDR_COPY) {
-                UV ofs= srl_read_varint_uv(aTHX_ dec);
-                if (expect_false( dec->save_pos )) {
-                    ERROR_BAD_COPY(dec, SRL_HDR_HASH);
-                } else {
+                UV ofs;
+                AND_DO_RETURN_NULL(
+                    srl_read_varint_uv(aTHX_ dec, &ofs),
+                    (SvREFCNT_dec(rv), SvREFCNT_dec(got_sv))
+                );
+                if (expect_true( dec->save_pos )) {
                     dec->save_pos= dec->pos;
                     dec->pos= dec->buf_start + ofs;
                     goto read_key;
                 }
+                else {
+                    WARN_BAD_COPY(dec, SRL_HDR_HASH);
+                    SvREFCNT_dec(got_sv);
+                    SvREFCNT_dec(rv);
+                    return FAIL;
+                }
             } else {
-                ERROR_UNEXPECTED(dec,"a stringish type");
+                WARN_UNEXPECTED(dec,"a stringish type");
+                SvREFCNT_dec(got_sv);
+                SvREFCNT_dec(rv);
+                return FAIL;
             }
-            ASSERT_BUF_SPACE(dec,key_len);
+            ASSERT_BUF_SPACE_DO_RETURN_NULL(dec,key_len,SvREFCNT_dec(rv));
             if (expect_false( !hv_store(hv,(char *)dec->pos,key_len,got_sv,0) )) {
-                ERROR_PANIC(dec,"failed to hv_store");
+                WARN_PANIC(dec,"failed to hv_store");
+                SvREFCNT_dec(got_sv);
+                SvREFCNT_dec(rv);
+                return FAIL;
             }
         }
         if (dec->save_pos) {
@@ -413,10 +490,11 @@ srl_read_hash(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
             dec->pos += key_len;
         }
     }
-    ASSERT_BUF_SPACE(dec,1);
+    ASSERT_BUF_SPACE_DO_RETURN_NULL(dec,1,SvREFCNT_dec(rv));
     if (expect_true( *dec->pos == SRL_HDR_TAIL )) {
         dec->pos++;
     } else {
+        SvREFCNT_dec(rv);
         ERROR_UNTERMINATED(dec,SRL_HDR_HASH,"HASH");
     }
     return rv;
@@ -426,9 +504,11 @@ srl_read_hash(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
 static SRL_INLINE SV *
 srl_read_ref(pTHX_ srl_decoder_t *dec, U8 *track_pos)
 {
-    UV item= srl_read_varint_uv(aTHX_ dec);
+    UV item;
     SV *ret= NULL;
     SV *referent= NULL;
+
+    AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &item));
     /* This is a little tricky - If we are not referencing something
      * already dumped and we have to track the scalar holding this ref
      * then we have to track the item *before* we deserialize whatever
@@ -438,6 +518,8 @@ srl_read_ref(pTHX_ srl_decoder_t *dec, U8 *track_pos)
     if (item) {
         /* something we did before */
         referent= srl_fetch_item(aTHX_ dec, item, "REF");
+        if (expect_false( !referent ))
+            return NULL;
         ret= newRV_inc(referent);
     } else {
         ret= newRV_noinc(newSV(0));
@@ -446,6 +528,10 @@ srl_read_ref(pTHX_ srl_decoder_t *dec, U8 *track_pos)
         srl_track_sv(aTHX_ dec, track_pos, ret);
     if (!referent) {
         referent= srl_read_single_value(aTHX_ dec, NULL);
+        if (expect_false( !referent )) {
+            SvREFCNT_dec(ret);
+            return NULL;
+        }
         SvRV_set(ret, referent);
     }
     return ret;
@@ -454,16 +540,22 @@ srl_read_ref(pTHX_ srl_decoder_t *dec, U8 *track_pos)
 static SRL_INLINE SV *
 srl_read_reuse(pTHX_ srl_decoder_t *dec)
 {
-    UV item= srl_read_varint_uv(aTHX_ dec);
-    SV *referent= srl_fetch_item(aTHX_ dec, item, "REUSE");
+    UV item;
+    SV *referent;
+    AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &item));
+    referent= srl_fetch_item(aTHX_ dec, item, "REUSE");
     return newSVsv(referent);
 }
 
 static SRL_INLINE SV *
 srl_read_alias(pTHX_ srl_decoder_t *dec)
 {
-    UV item= srl_read_varint_uv(aTHX_ dec);
-    SV *referent= srl_fetch_item(aTHX_ dec, item, "ALIAS");
+    UV item;
+    SV *referent;
+    AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &item));
+    referent = srl_fetch_item(aTHX_ dec, item, "ALIAS");
+    if (expect_false( !referent ))
+        return NULL;
     SvREFCNT_inc(referent);
     return referent;
 }
@@ -471,17 +563,29 @@ srl_read_alias(pTHX_ srl_decoder_t *dec)
 static SRL_INLINE SV *
 srl_read_copy(pTHX_ srl_decoder_t *dec)
 {
-    UV item= srl_read_varint_uv(aTHX_ dec);
+    UV item;
     SV *ret;
+    AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &item));
+
     if (expect_false( dec->save_pos )) {
-        ERRORf1("COPY(%d) called during parse", item);
+        WARNf1("COPY(%d) called during parse", item);
+        return NULL;
     }
     if (expect_false( (IV)item > dec->buf_end - dec->buf_start )) {
-        ERRORf1("COPY(%d) points out of packet",item);
+        WARNf1("COPY(%d) points out of packet",item);
+        return NULL;
     }
+
     dec->save_pos= dec->pos;
     dec->pos= dec->buf_start + item;
+
     ret= srl_read_single_value(aTHX_ dec, NULL);
+    if (expect_false( !ret )) {
+        dec->pos= dec->save_pos; /* probably not needed */
+        dec->save_pos= 0; /* probably not needed */
+        return NULL;
+    }
+
     dec->pos= dec->save_pos;
     dec->save_pos= 0;
     return ret;
@@ -491,8 +595,13 @@ static SRL_INLINE SV *
 srl_read_weaken(pTHX_ srl_decoder_t *dec, U8 *track_pos)
 {
     SV* ret= srl_read_single_value(aTHX_ dec, track_pos);
-    if (expect_false( !SvROK(ret) ))
-        ERROR("WEAKEN op");
+    if (expect_false( !ret ))
+        return NULL;
+    if (expect_false( !SvROK(ret) )) {
+        MYWARN("WEAKEN op");
+        return NULL;
+    }
+
     if (expect_true( SvREFCNT(ret)==1 )) {
         if (expect_false( !dec->weakref_av ))
             dec->weakref_av= newAV();
@@ -512,15 +621,17 @@ srl_read_bless(pTHX_ srl_decoder_t *dec)
     UV ofs= 0;
     /* first deparse the thing we are going to bless */
     SV* ret= srl_read_single_value(aTHX_ dec, NULL);
+    if (expect_false( !ret ))
+        return NULL;
     /* now find the class name - first check if this is a copy op
      * this is bit tricky, as we could have a copy of a raw string
      * we could also have a copy of a previously mentioned class
      * name. We have to handle both, which leads to some non-linear
      * code flow in the below code */
-    ASSERT_BUF_SPACE(dec,1);
+    ASSERT_BUF_SPACE_NULL(dec,1);
     if (*dec->pos == SRL_HDR_COPY) {
         dec->pos++;
-        ofs= srl_read_varint_uv(aTHX_ dec);
+        AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &ofs));
         if (dec->ref_stashes) {
             stash= PTABLE_fetch(dec->ref_seenhash, (void *)ofs);
         }
@@ -530,7 +641,7 @@ srl_read_bless(pTHX_ srl_decoder_t *dec)
             storepos= ofs;
         /* we should have seen this item before as a class name */
     } else {
-        U32 key_len;
+        UV key_len;
         I32 flags= GV_ADD;
         U8 tag;
         /* we now expect either a STRING type or a COPY type */
@@ -540,28 +651,33 @@ srl_read_bless(pTHX_ srl_decoder_t *dec)
 
         if (tag == SRL_HDR_STRING_UTF8) {
             flags = flags | SVf_UTF8;
-            key_len= srl_read_varint_uv(aTHX_ dec);
+            AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &key_len));
         } else if (tag & SRL_HDR_ASCII) {
             key_len= tag & SRL_HDR_ASCII_LEN_MASK;
         } else if (tag == SRL_HDR_STRING) {
-            key_len= srl_read_varint_uv(aTHX_ dec);
+            AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &key_len));
         } else if (tag == SRL_HDR_COPY) {
-            ofs= srl_read_varint_uv(aTHX_ dec);
+            AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &ofs));
           read_copy:
-            if (expect_false( dec->save_pos )) {
-                ERROR_BAD_COPY(dec, SRL_HDR_HASH);
-            } else {
-                if (expect_false( dec->buf_end - dec->buf_start < (IV)ofs ) )
-                    ERRORf1("copy command points at tag outside of buffer, offset=%"UVuf, ofs);
+            if (expect_true( !dec->save_pos )) {
+                if (expect_false( dec->buf_end - dec->buf_start < (IV)ofs ) ) {
+                    WARNf1("copy command points at tag outside of buffer, offset=%"UVuf, ofs);
+                    return NULL;
+                }
                 dec->save_pos= dec->pos;
                 dec->pos= dec->buf_start + ofs;
                 goto read_class;
             }
+            else {
+                WARN_BAD_COPY(dec, SRL_HDR_HASH);
+                return NULL;
+            }
             /* NOTREACHED */
         } else {
-            ERROR_UNEXPECTED(dec,"a class name");
+            WARN_UNEXPECTED(dec, "a class name");
+            return NULL;
         }
-        ASSERT_BUF_SPACE(dec, key_len);
+        ASSERT_BUF_SPACE_NULL(dec, key_len);
         if (expect_false( !dec->ref_stashes )) {
             dec->ref_stashes = PTABLE_new();
             dec->ref_bless_av = PTABLE_new();
@@ -574,10 +690,14 @@ srl_read_bless(pTHX_ srl_decoder_t *dec)
             dec->pos += key_len;
         }
     }
-    if (expect_false( !storepos ))
-        ERROR("Bad bless: no storepos");
-    if (expect_false( !stash ))
-        ERROR("Bad bless: no stash");
+    if (expect_false( !storepos )) {
+        MYWARN("Bad bless: no storepos");
+        return NULL;
+    }
+    if (expect_false( !stash )) {
+        MYWARN("Bad bless: no stash");
+        return NULL;
+    }
 
     PTABLE_store(dec->ref_stashes, (void *)storepos, (void *)stash);
     if (NULL == (av= (AV *)PTABLE_fetch(dec->ref_bless_av, (void *)ofs)) ) {
@@ -604,15 +724,19 @@ srl_read_single_value(pTHX_ srl_decoder_t *dec, U8 *track_pos)
     U8 tag;
 
   read_again:
-    if (expect_false( BUF_DONE(dec) ))
-        ERROR("unexpected end of input stream while expecting a single value");
+    if (expect_false( BUF_DONE(dec) )) {
+        MYWARN("unexpected end of input stream while expecting a single value");
+        return NULL;
+    }
 
     tag= *dec->pos++;
     if (tag & SRL_HDR_TRACK_FLAG) {
         if (expect_true( track_pos == 0 ))
             track_pos= dec->pos - 1;
-        else
-            ERROR("bad tracking");
+        else {
+            NYWARN("bad tracking");
+            return NULL;
+        }
         tag= tag & ~SRL_HDR_TRACK_FLAG;
     }
     if ( tag <= SRL_HDR_POS_HIGH ) {
@@ -621,7 +745,7 @@ srl_read_single_value(pTHX_ srl_decoder_t *dec, U8 *track_pos)
         ret= newSViv( -tag + 15);
     } else if (tag & SRL_HDR_ASCII) {
         len= (STRLEN)(tag & SRL_HDR_ASCII_LEN_MASK);
-        ASSERT_BUF_SPACE(dec,len);
+        ASSERT_BUF_SPACE_NULL(dec,len);
         ret= newSVpvn((char*)dec->pos,len);
         dec->pos += len;
     }
@@ -649,12 +773,12 @@ srl_read_single_value(pTHX_ srl_decoder_t *dec, U8 *track_pos)
             case SRL_HDR_COPY:          ret= srl_read_copy(aTHX_ dec);          break;
 
             case SRL_HDR_EXTEND:        ret= srl_read_extend(aTHX_ dec);        break;
-            case SRL_HDR_LIST:          ERROR_UNEXPECTED(dec,tag);              break;
+            case SRL_HDR_LIST:          {ERROR_UNEXPECTED(dec,tag); return NULL;} break;
 
             case SRL_HDR_WEAKEN:        ret= srl_read_weaken(aTHX_ dec, track_pos); break;
             case SRL_HDR_REGEXP:        ret= srl_read_regexp(aTHX_ dec);        break;
 
-            case SRL_HDR_TAIL:          ERROR_UNEXPECTED(dec,tag);              break;
+            case SRL_HDR_TAIL:          {ERROR_UNEXPECTED(dec,tag); return NULL;} break;
             case SRL_HDR_PAD:           /* no op */                             
                 while (BUF_NOT_DONE(dec) && *dec->pos == SRL_HDR_PAD)
                     dec->pos++;
@@ -662,12 +786,15 @@ srl_read_single_value(pTHX_ srl_decoder_t *dec, U8 *track_pos)
             break;
             default:
                 if (expect_true( SRL_HDR_RESERVED_LOW <= tag && tag <= SRL_HDR_RESERVED_HIGH )) {
-                    ret= srl_read_reserved(aTHX_ dec, tag);
+                    AND_RETURN_NULL(ret= srl_read_reserved(aTHX_ dec, tag));
                 } else {
-                    ERROR_PANIC(dec,tag);
+                    WARN_PANIC(dec,tag);
+                    return NULL;
                 }
             break;
         }
+        if (expect_false( !ret ))
+            return NULL;
     }
     if (expect_false( track_pos ))
         srl_track_sv(aTHX_ dec, track_pos, ret);
@@ -684,8 +811,9 @@ srl_read_blessv(pTHX_ srl_decoder_t *dec)
 static SRL_INLINE SV *
 srl_read_reserved(pTHX_ srl_decoder_t *dec, U8 tag)
 {
+    UV len;
     (void)tag; /* unused as of now */
-    const UV len = srl_read_varint_uv(aTHX_ dec);
+    AND_RETURN_FAIL(srl_read_varint_uv(aTHX_ dec, &len));
     ASSERT_BUF_SPACE(dec, len);
     dec->pos += len; /* discard */
     return &PL_sv_undef;
