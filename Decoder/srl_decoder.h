@@ -48,25 +48,26 @@ int srl_finalize_structure(pTHX_ srl_decoder_t *dec);
 
 
 #define MYCROAK(fmt, args...) croak("Sereal: Error in %s line %u: " fmt, __FILE__, __LINE__ , ## args)
-#define MYWARN(fmt, args...) warn("Sereal: Error in %s line %u: " fmt, __FILE__, __LINE__ , ## args)
 #define ERROR(msg) MYCROAK("%s", msg)
 #define ERRORf1(fmt,var) MYCROAK(fmt, (var))
 #define ERRORf2(fmt,var1,var2) MYCROAK(fmt, (var1),(var2))
 
-#define WARNf1(fmt,var) MYWARN(fmt, (var))
-#define WARNf2(fmt,var1,var2) MYWARN(fmt, (var1),(var2))
+#define ERROR_UNIMPLEMENTED(dec,tag,str) STMT_START {   \
+    warn("Tag %u %s is unimplemented at ofs: %d",       \
+         tag,str, (int)BUF_POS_OFS(dec));               \
+    return NULL;                                        \
+} STMT_END 
+#define ERROR_UNTERMINATED(dec,tag,str) STMT_START {    \
+    warn("Tag %u %s was not terminated properly at ofs "\
+         "%lu with %lu to go",                          \
+         tag, str,dec->pos - dec->buf_start,            \
+         dec->buf_end - dec->pos);                      \
+    return NULL;                                        \
+} STMT_END 
 
-#define ERROR_UNIMPLEMENTED(dec,tag,str) STMT_START {      \
-    MYWARN("Tag %u %s is unimplemented at ofs: %d", tag,str, BUF_POS_OFS(dec)); \
-    return NULL;                                \
-} STMT_END 
-#define ERROR_UNTERMINATED(dec,tag,str) STMT_START {      \
-    MYWARN("Tag %u %s was not terminated properly at ofs %lu with %lu to go", tag, str,dec->pos - dec->buf_start,dec->buf_end - dec->pos); \
-    return NULL;                                \
-} STMT_END 
-#define WARN_BAD_COPY(dec, tag) MYWARN("While processing tag %u encountered a bad COPY tag", tag)
-#define WARN_UNEXPECTED(dec, msg) MYWARN("Unexpected tag %u while expecting %s", *(dec)->pos, msg)
-#define WARN_PANIC(dec, msg) MYWARN("Panic: %s", msg);
+#define WARN_BAD_COPY(dec, tag) warn("While processing tag %u encountered a bad COPY tag", tag)
+#define WARN_UNEXPECTED(dec, msg) warn("Unexpected tag %u while expecting %s", *(dec)->pos, msg)
+#define WARN_PANIC(dec, msg) warn("Panic: %s", msg);
 
 /* if set, the decoder struct needs to be cleared instead of freed at
  * the end of a deserialization operation */
@@ -127,16 +128,16 @@ int srl_finalize_structure(pTHX_ srl_decoder_t *dec);
 #define ASSERT_BUF_SPACE_FAIL(dec,len) STMT_START {                 \
     OR_DO_RETURN_FAIL(                                              \
         (UV)BUF_SPACE((dec)) < (UV)(len),                           \
-        MYWARN("Unexpected termination of packet, want %lu bytes, " \
-               "only have %lu available",                           \
-               (UV)(len), (UV)BUF_SPACE((dec)))                     \
+        warn("Unexpected termination of packet, want %lu bytes, "   \
+             "only have %lu available",                             \
+             (UV)(len), (UV)BUF_SPACE((dec)))                       \
     );                                                              \
 } STMT_END
 
 #define WARN_BUF_SPACE(dec, len)                                    \
-        MYWARN("Unexpected termination of packet, want %lu bytes, " \
-               "only have %lu available",                           \
-               (UV)(len), (UV)BUF_SPACE((dec)))
+        warn("Unexpected termination of packet, want %lu bytes, "   \
+             "only have %lu available",                             \
+             (UV)(len), (UV)BUF_SPACE((dec)))
 
 #define ASSERT_BUF_SPACE_NULL(dec,len) STMT_START {                 \
     OR_DO_RETURN_NULL(                                              \

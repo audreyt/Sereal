@@ -173,11 +173,11 @@ srl_read_header(pTHX_ srl_decoder_t *dec)
         /* must do this via a temporary as it modifes dec->pos itself */
         AND_DO_RETURN_FAIL(
             srl_read_varint_uv(aTHX_ dec, &len),
-            MYWARN("bad header")
+            warn("bad header")
         );
         dec->pos += len;
     } else {
-        MYWARN("bad header");
+        warn("bad header");
         return FAIL;
     }
     return SUCCESS;
@@ -201,7 +201,7 @@ srl_finalize_structure(pTHX_ srl_decoder_t *dec)
             I32 len;
             OR_DO_RETURN_FAIL(
                 !stash || !ref_bless_av,
-                (PTABLE_iter_free(it), MYWARN("missing stash or ref_bless_av!"))
+                (PTABLE_iter_free(it), warn("missing stash or ref_bless_av!"))
             );
             for( len= av_len(ref_bless_av) + 1 ; len > 0 ; len-- ) {
                 SV* obj= av_pop(ref_bless_av);
@@ -209,7 +209,7 @@ srl_finalize_structure(pTHX_ srl_decoder_t *dec)
                     sv_bless(obj, stash);
                 } else {
                     PTABLE_iter_free(it);
-                    MYWARN("object missing from ref_bless_av array?");
+                    warn("object missing from ref_bless_av array?");
                     return FAIL;
                 }
             }
@@ -230,13 +230,13 @@ srl_read_varint_uv_safe(pTHX_ srl_decoder_t *dec, UV *rv)
         lshift += 7;
         AND_DO_RETURN_FAIL(
             lshift > (sizeof(UV) * 8),
-            MYWARN("varint too big")
+            warn("varint too big")
         );
     }
     if (expect_true( BUF_NOT_DONE(dec) )) {
         uv |= ((UV)*dec->pos++ << lshift);
     } else {
-        MYWARN("varint terminated prematurely");
+        warn("varint terminated prematurely");
         return FAIL;
     }
 
@@ -255,7 +255,7 @@ srl_read_varint_uv_nocheck(pTHX_ srl_decoder_t *dec, UV *rv)
         lshift += 7;
         AND_DO_RETURN_FAIL(
             lshift > (sizeof(UV) * 8),
-            MYWARN("varint too big")
+            warn("varint too big")
         );
     }
     uv |= ((UV)(*dec->pos++) << lshift);
@@ -286,7 +286,7 @@ srl_fetch_item(pTHX_ srl_decoder_t *dec, UV item, const char const *tag_name)
 {
     SV *sv= (SV *)PTABLE_fetch(dec->ref_seenhash, (void *)item);
     if (expect_false( !sv )) {
-        WARNf2("%s(%d) references an unknown item", tag_name, item);
+        warn("%s(%d) references an unknown item", tag_name, (int)item);
         return NULL;
     }
     return sv;
@@ -381,7 +381,7 @@ srl_read_array(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
     /* inline ASSERT_BUF_SPACE with SvREFCNT_dec - TODO? Macroify */
     if (expect_false( (UV)BUF_SPACE((dec)) < (UV)1 )) {
         SvREFCNT_dec(rv);
-        MYWARN("Unexpected termination of packet, want %lu bytes, "
+        warn("Unexpected termination of packet, want %lu bytes, "
                "only have %lu available",
                (UV)1, (UV)BUF_SPACE((dec)));
     }
@@ -396,7 +396,7 @@ srl_read_array(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
 
 static SRL_INLINE SV *
 srl_read_hash(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
-    IV num_keys;
+    UV num_keys;
     HV *hv;
     SV *rv;
 
@@ -441,7 +441,7 @@ srl_read_hash(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
                 SvREFCNT_dec(got_sv);
                 SvREFCNT_dec(rv);
                 SvREFCNT_dec(key_sv); /* throw away the key */
-                MYWARN("Panic: failed to hv_store_ent");
+                warn("Panic: failed to hv_store_ent");
                 return NULL;
             }
         } else {
@@ -467,20 +467,20 @@ srl_read_hash(pTHX_ srl_decoder_t *dec, U8 *track_pos) {
                     WARN_BAD_COPY(dec, SRL_HDR_HASH);
                     SvREFCNT_dec(got_sv);
                     SvREFCNT_dec(rv);
-                    return FAIL;
+                    return NULL;
                 }
             } else {
                 WARN_UNEXPECTED(dec,"a stringish type");
                 SvREFCNT_dec(got_sv);
                 SvREFCNT_dec(rv);
-                return FAIL;
+                return NULL;
             }
             ASSERT_BUF_SPACE_DO_RETURN_NULL(dec,key_len,SvREFCNT_dec(rv));
             if (expect_false( !hv_store(hv,(char *)dec->pos,key_len,got_sv,0) )) {
                 WARN_PANIC(dec,"failed to hv_store");
                 SvREFCNT_dec(got_sv);
                 SvREFCNT_dec(rv);
-                return FAIL;
+                return NULL;
             }
         }
         if (dec->save_pos) {
@@ -568,11 +568,11 @@ srl_read_copy(pTHX_ srl_decoder_t *dec)
     AND_RETURN_NULL(srl_read_varint_uv(aTHX_ dec, &item));
 
     if (expect_false( dec->save_pos )) {
-        WARNf1("COPY(%d) called during parse", item);
+        warn("COPY(%d) called during parse", item);
         return NULL;
     }
     if (expect_false( (IV)item > dec->buf_end - dec->buf_start )) {
-        WARNf1("COPY(%d) points out of packet",item);
+        warn("COPY(%d) points out of packet",item);
         return NULL;
     }
 
@@ -598,7 +598,7 @@ srl_read_weaken(pTHX_ srl_decoder_t *dec, U8 *track_pos)
     if (expect_false( !ret ))
         return NULL;
     if (expect_false( !SvROK(ret) )) {
-        MYWARN("WEAKEN op");
+        warn("WEAKEN op");
         return NULL;
     }
 
@@ -661,7 +661,7 @@ srl_read_bless(pTHX_ srl_decoder_t *dec)
           read_copy:
             if (expect_true( !dec->save_pos )) {
                 if (expect_false( dec->buf_end - dec->buf_start < (IV)ofs ) ) {
-                    WARNf1("copy command points at tag outside of buffer, offset=%"UVuf, ofs);
+                    warn("copy command points at tag outside of buffer, offset=%"UVuf, ofs);
                     return NULL;
                 }
                 dec->save_pos= dec->pos;
@@ -691,11 +691,11 @@ srl_read_bless(pTHX_ srl_decoder_t *dec)
         }
     }
     if (expect_false( !storepos )) {
-        MYWARN("Bad bless: no storepos");
+        warn("Bad bless: no storepos");
         return NULL;
     }
     if (expect_false( !stash )) {
-        MYWARN("Bad bless: no stash");
+        warn("Bad bless: no stash");
         return NULL;
     }
 
@@ -725,7 +725,7 @@ srl_read_single_value(pTHX_ srl_decoder_t *dec, U8 *track_pos)
 
   read_again:
     if (expect_false( BUF_DONE(dec) )) {
-        MYWARN("unexpected end of input stream while expecting a single value");
+        warn("unexpected end of input stream while expecting a single value");
         return NULL;
     }
 
@@ -826,16 +826,18 @@ srl_read_reserved(pTHX_ srl_decoder_t *dec, U8 tag)
 static SRL_INLINE SV *
 srl_read_regexp(pTHX_ srl_decoder_t *dec)
 {
-    SV *sv_pat= srl_read_single_value(aTHX_ dec, NULL);
     SV *ret= NULL;
-    ASSERT_BUF_SPACE(dec, 1);
+    SV *sv_pat= srl_read_single_value(aTHX_ dec, NULL);
+    if (expect_false( !sv_pat ))
+        return NULL;
+    ASSERT_BUF_SPACE_NULL(dec, 1);
     /* For now we will serialize the flags as ascii strings. Maybe we should use
      * something else but this is easy to debug and understand - since the modifiers
      * are tagged it doesn't matter much, we can add other tags later */
     if (expect_true( *dec->pos & SRL_HDR_ASCII )) {
         U8 mod_len= *dec->pos++ & SRL_HDR_ASCII_LEN_MASK;
         U32 flags= 0;
-        ASSERT_BUF_SPACE(dec, mod_len);
+        ASSERT_BUF_SPACE_DO_RETURN_NULL(dec, mod_len, SvREFCNT_dec(sv_pat));
         while (mod_len > 0) {
             mod_len--;
             switch (*dec->pos++) {
@@ -887,7 +889,8 @@ srl_read_regexp(pTHX_ srl_decoder_t *dec)
 #endif
     }
     else {
-        ERROR("Expecting SRL_HDR_ASCII for modifiers of regexp");
+        warn("Expecting SRL_HDR_ASCII for modifiers of regexp");
+        return NULL;
     }
     return ret;
 }
