@@ -48,9 +48,6 @@ int srl_finalize_structure(pTHX_ srl_decoder_t *dec);
 
 
 #define MYCROAK(fmt, args...) croak("Sereal: Error in %s line %u: " fmt, __FILE__, __LINE__ , ## args)
-#define ERROR(msg) MYCROAK("%s", msg)
-#define ERRORf1(fmt,var) MYCROAK(fmt, (var))
-#define ERRORf2(fmt,var1,var2) MYCROAK(fmt, (var1),(var2))
 
 #define ERROR_UNIMPLEMENTED(dec,tag,str) STMT_START {   \
     warn("Tag %u %s is unimplemented at ofs: %d",       \
@@ -77,8 +74,8 @@ int srl_finalize_structure(pTHX_ srl_decoder_t *dec);
 #define FAIL 1
 #define SUCCESS 0
 
-#define OR_RETURN(expr, rv) if (expect_false( (expr) )) return(rv)
-#define AND_RETURN(expr, rv) if (expect_false( !(expr) )) return(rv)
+#define OR_RETURN(expr, rv) if (expect_false( !(expr) )) return(rv)
+#define AND_RETURN(expr, rv) if (expect_false( (expr) )) return(rv)
 
 #define OR_RETURN_FAIL(expr) OR_RETURN(expr, FAIL)
 #define AND_RETURN_FAIL(expr) AND_RETURN(expr, FAIL)
@@ -87,14 +84,14 @@ int srl_finalize_structure(pTHX_ srl_decoder_t *dec);
 #define AND_RETURN_NULL(expr) AND_RETURN(expr, NULL)
 
 #define OR_RETURN_refcnt(expr, rv, maybesv) STMT_START {    \
-        if (expect_false( (expr) )) {                       \
+        if (expect_false( !(expr) )) {                      \
             if (maybesv)                                    \
                 SvREFCNT_dec(maybesv);                      \
             return(rv);                                     \
         }                                                   \
     } STMT_END
 #define AND_RETURN_refcnt(expr, rv, maybesv) STMT_START {   \
-        if (expect_false( !(expr) )) {                      \
+        if (expect_false( (expr) )) {                       \
             if (maybesv)                                    \
                 SvREFCNT_dec(maybesv);                      \
             return(rv);                                     \
@@ -108,13 +105,13 @@ int srl_finalize_structure(pTHX_ srl_decoder_t *dec);
 #define AND_RETURN_NULL_refcnt(expr, maybesv) AND_RETURN_refcnt(expr, NULL, maybesv)
 
 #define OR_DO_RETURN(expr, rv, stmt) STMT_START {   \
-        if (expect_false( (expr) )) {               \
+        if (expect_false( !(expr) )) {              \
             stmt;                                   \
             return(rv);                             \
         }                                           \
     } STMT_END
 #define AND_DO_RETURN(expr, rv, stmt) STMT_START {  \
-        if (expect_false( !(expr) )) {              \
+        if (expect_false( (expr) )) {               \
             stmt;                                   \
             return(rv);                             \
         }                                           \
@@ -126,7 +123,7 @@ int srl_finalize_structure(pTHX_ srl_decoder_t *dec);
 #define AND_DO_RETURN_NULL(expr, stmt) AND_DO_RETURN(expr, NULL, stmt)
 
 #define ASSERT_BUF_SPACE_FAIL(dec,len) STMT_START {                 \
-    OR_DO_RETURN_FAIL(                                              \
+    AND_DO_RETURN_FAIL(                                             \
         (UV)BUF_SPACE((dec)) < (UV)(len),                           \
         warn("Unexpected termination of packet, want %lu bytes, "   \
              "only have %lu available",                             \
@@ -140,7 +137,7 @@ int srl_finalize_structure(pTHX_ srl_decoder_t *dec);
              (UV)(len), (UV)BUF_SPACE((dec)))
 
 #define ASSERT_BUF_SPACE_NULL(dec,len) STMT_START {                 \
-    OR_DO_RETURN_NULL(                                              \
+    AND_DO_RETURN_NULL(                                             \
         (UV)BUF_SPACE((dec)) < (UV)(len),                           \
         WARN_BUF_SPACE(dec, len);                                   \
     );                                                              \

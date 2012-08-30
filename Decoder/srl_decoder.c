@@ -199,7 +199,7 @@ srl_finalize_structure(pTHX_ srl_decoder_t *dec)
             HV *stash = (HV* )ent->value;
             AV *ref_bless_av  = PTABLE_fetch(dec->ref_bless_av, ent->key);
             I32 len;
-            OR_DO_RETURN_FAIL(
+            AND_DO_RETURN_FAIL(
                 !stash || !ref_bless_av,
                 (PTABLE_iter_free(it), warn("missing stash or ref_bless_av!"))
             );
@@ -786,7 +786,7 @@ srl_read_single_value(pTHX_ srl_decoder_t *dec, U8 *track_pos)
             break;
             default:
                 if (expect_true( SRL_HDR_RESERVED_LOW <= tag && tag <= SRL_HDR_RESERVED_HIGH )) {
-                    AND_RETURN_NULL(ret= srl_read_reserved(aTHX_ dec, tag));
+                    OR_RETURN_NULL(ret= srl_read_reserved(aTHX_ dec, tag));
                 } else {
                     warn("Panic: Found invalid tag %u", tag);
                     return NULL;
@@ -859,7 +859,8 @@ srl_read_regexp(pTHX_ srl_decoder_t *dec)
                     break;
 #endif
                 default:
-                    ERROR("bad modifier");
+                    warn("bad modifier");
+                    return NULL;
                     break;
             }
         }
